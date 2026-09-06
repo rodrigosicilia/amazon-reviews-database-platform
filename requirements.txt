@@ -1,5 +1,11 @@
-pymysql
-pymongo
-neo4j
-matplotlib
-wordcloud
+# Direct Python dependencies of the project.
+# Install with: python -m pip install -r requirements.txt
+#
+# The three database servers (MySQL, MongoDB and Neo4j) are external
+# services and must be installed and running separately. See README.md.
+
+PyMySQL==1.1.2
+pymongo==4.16.0
+neo4j==6.1.0
+matplotlib==3.10.1
+wordcloud==1.9.6
