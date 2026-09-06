@@ -8,8 +8,8 @@
 # CONFIGURACION DE MYSQL
 # ------------------------------
 MYSQL_HOST = "localhost"
-MYSQL_USER = "..."
-MYSQL_PASSWORD = "..."
+MYSQL_USER = "your_SQL_user"
+MYSQL_PASSWORD = "your_SQL_password"
 MYSQL_DATABASE = "amazon_reviews_mysql"
 
 # ------------------------------
@@ -27,7 +27,7 @@ MONGO_CONNECTION_STRING = f"mongodb://{MONGO_HOST}:{MONGO_PORT}"
 NEO4J_HOST = "localhost"
 NEO4J_PORT = 7687
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "aaaaaaaa"
+NEO4J_PASSWORD = "your_neo4j_password"
 
 # ------------------------------
 # RUTAS DE LOS FICHEROS
