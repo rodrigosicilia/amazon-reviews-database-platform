@@ -288,6 +288,8 @@ python inserta_dataset.py
 
 ## Authors and contributions
 
+The project was developed jointly by both authors, who contributed in equal measure. The breakdown below records which parts each of us led, not how much work each of us did.
+
 ### Rodrigo Alejandro Sicilia Maroto
 
 - Designed and implemented the MySQL data model and backend.
