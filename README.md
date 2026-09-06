@@ -8,10 +8,15 @@ This project was developed by **Rodrigo Alejandro Sicilia Maroto** and **Claudia
 
 The project works with four Amazon 5-core review datasets:
 
-- Toys and Games — 167,597 reviews
-- Video Games — 231,780 reviews
-- Digital Music — 64,706 reviews
-- Musical Instruments — 10,261 reviews
+| Dataset | Reviews |
+| --- | ---: |
+| Toys and Games | 167,597 |
+| Video Games | 231,780 |
+| Digital Music | 64,706 |
+| Musical Instruments | 10,261 |
+| **Total** | **474,344** |
+
+Of those records, 387 reviews appear in more than one source file. They are stored once and their provenance is preserved, as explained below. A fifth dataset, Office Products, can be inserted incrementally with `inserta_dataset.py`, which takes the loaded corpus above 500,000 reviews.
 
 The original data is split between two database systems according to its structure:
 
@@ -19,7 +24,59 @@ The original data is split between two database systems according to its structu
 - **MongoDB** stores the textual and flexible fields of each review, including the review text, summary and helpfulness information.
 - **Neo4j** is used to build and explore several graph representations involving users, products, categories and user similarity.
 
-The relational design preserves the source category of each review through the `REVIEW_CATEGORIA` table. This is necessary because the same product, and even the same logical review, may appear in more than one source dataset.
+## Database design
+
+The relational model is built around five tables. Every review is linked to the user who wrote it and the product it refers to, and its source category is recorded separately in `REVIEW_CATEGORIA`.
+
+```mermaid
+erDiagram
+    USUARIO ||--o{ REVIEW : writes
+    ARTICULO ||--o{ REVIEW : receives
+    REVIEW ||--o{ REVIEW_CATEGORIA : "appears in"
+    CATEGORIA ||--o{ REVIEW_CATEGORIA : groups
+
+    USUARIO {
+        int id_usuario PK
+        string reviewerID UK
+        string reviewerName
+    }
+    ARTICULO {
+        int id_articulo PK
+        string asin UK
+    }
+    CATEGORIA {
+        int id_categoria PK
+        string nombre_categoria UK
+    }
+    REVIEW {
+        int id_review PK
+        int id_usuario FK
+        int id_articulo FK
+        tinyint overall
+        date reviewTime
+        bigint unixReviewTime
+    }
+    REVIEW_CATEGORIA {
+        int id_review PK "FK to REVIEW"
+        int id_categoria PK "FK to CATEGORIA"
+    }
+```
+
+`REVIEW` carries a `UNIQUE(id_usuario, id_articulo, unixReviewTime)` constraint, which is what identifies a logical review and prevents exact duplicates from being inserted twice.
+
+### Why the category belongs to the review, not to the product
+
+The same ASIN can appear in several of the source files, so a product is not tied to a single category. An earlier version of the model used an intermediate `ARTICULO_CATEGORIA` table, but that turned out to be wrong for the queries the project needs: if the category is derived from the product, a review written in one dataset shows up when querying a different one, simply because the product also exists there.
+
+Checking the raw files confirmed the problem. `verificar_datasets.py` reads the four JSON files line by line and groups reviews by `reviewerID`, `asin` and `unixReviewTime`. It found **387 reviews present in more than one file**, all of them exact repetitions, with no conflicting cases. That result justified the final design: `REVIEW` stores each logical review once, and `REVIEW_CATEGORIA` records every source category in which it appeared. `ARTICULO_CATEGORIA` was removed from the model, and every category-level query in the project goes through `REVIEW_CATEGORIA`.
+
+The same check showed that `reviewerName` is not reliable as an identifier: the same `reviewerID` sometimes appears with a name and sometimes without, and occasionally with different names. `reviewerID` is therefore the unique key of `USUARIO`, and `reviewerName` is kept as a descriptive attribute only.
+
+### Document side and indices
+
+The MongoDB collection `reviews_texto` stores `helpful`, `summary` and `reviewText`, plus the `id_review` that links each document to its MySQL row. That field carries a UNIQUE index, which both speeds up the join between the two systems and protects the collection against duplicates.
+
+Beyond the indices implied by primary keys and UNIQUE constraints, four indices were added by hand, each for a query the project actually runs: `REVIEW_CATEGORIA(id_categoria, id_review)` for the category filters, `REVIEW(reviewTime)` and `REVIEW(unixReviewTime)` for the temporal aggregations, and `USUARIO(reviewerName)` for the alphabetical user selection in the Neo4j section. No index was created on `REVIEW(overall)`, because its cardinality is too low to justify the cost.
 
 ## Main features
 
@@ -31,6 +88,14 @@ The relational design preserves the source category of each review through the `
 - Detects duplicate reviews and preserves their source categories.
 - Validates assumptions about duplicated reviews, multicategory products and reviewer names.
 - Supports incremental insertion of an additional review dataset.
+
+### Load performance
+
+The first working version of `load_data.py` issued between six and eight queries per review, which meant millions of round-trips to MySQL for a corpus of this size. Three changes brought the load time down without altering the data model or the final result:
+
+- **In-memory caches** for `USUARIO` and `ARTICULO`, so that a `reviewerID` or an `asin` is looked up in MySQL only the first time it appears.
+- **`INSERT IGNORE` instead of SELECT-then-INSERT** at the two points where duplicates can occur. For `REVIEW_CATEGORIA` the composite key makes this a straight replacement of two queries by one. For `REVIEW` the identifier still has to be recovered, so the insert is attempted first and a fallback `SELECT` runs only when MySQL rejects the row, which in practice happens only for the 387 cross-dataset duplicates.
+- **Batched MongoDB writes** of 10,000 documents with `insert_many` instead of one `insert_one` per review. If part of a batch fails, the corresponding MySQL rows are removed so that both databases stay in sync.
 
 ### Data visualisation
 
@@ -44,10 +109,13 @@ The project provides seven visual analyses:
 6. Word cloud by product category.
 7. Average rating by category.
 
-The visualisations are available through both:
+The visualisations are available through both a terminal menu in `menu_visualizacion.py` and an interactive Tkinter dashboard in `dashboard.py`. The dashboard imports the query functions from the terminal menu rather than duplicating them, so both interfaces share the same data-access logic.
 
-- A terminal menu in `menu_visualizacion.py`.
-- An interactive Tkinter dashboard in `dashboard.py`.
+![Word cloud built from the summary field of the Video Games category](assets/wordcloud_video_games.png)
+
+The word cloud combines both databases: the review identifiers for a category are obtained from MySQL through `REVIEW_CATEGORIA`, and the corresponding summaries are then retrieved from MongoDB in batches of 50,000, accumulating word frequencies with a `Counter` instead of building a single large string.
+
+Four of these visualisations were also rebuilt in Power BI from CSV exports of the same SQL queries, as an alternative to the Python versions. The resulting panel is included in the project report.
 
 ### Neo4j graph analysis
 
@@ -58,12 +126,20 @@ The visualisations are available through both:
 - Relationships between users and the different product categories they reviewed.
 - Popular products, their reviewers and the number of products reviewed in common by each pair of users.
 
+![Neo4j graph of the five most popular products with fewer than 40 reviews](assets/neo4j_popular_products.png)
+
+MySQL is used as the computation layer and Neo4j purely as the visualisation layer: selections, filters and aggregations run in SQL, and only the resulting nodes and relationships are loaded into Neo4j with `UNWIND` and `MERGE`. Uniqueness constraints on the node identifiers provide the indices that make `MERGE` efficient.
+
 ### Recommendation systems
 
 Two recommendation approaches are included:
 
 - `recomendacion.py`: recommends the ten most popular products in a category that a user has not previously reviewed.
-- `modelo_ml.py`: implements user-based collaborative filtering with Pearson correlation, rating prediction and model evaluation using MAE.
+- `modelo_ml.py`: implements user-based collaborative filtering with Pearson correlation.
+
+![Pipeline of the collaborative-filtering recommender](assets/recommender_pipeline.png)
+
+The collaborative-filtering model was evaluated by splitting each user's ratings into 80% training and 20% test, with a fixed seed, and predicting the test ratings from the *k* = 20 most similar neighbours. The result was a **mean absolute error of 0.8388** on a 1-to-5 scale, over 27,489 predictions. A further 84,541 test ratings could not be predicted at all because the user had no neighbour who had rated that product, which is the expected consequence of a very sparse user-item matrix.
 
 ## Repository structure
 
@@ -79,6 +155,9 @@ Two recommendation approaches are included:
 ├── modelo_ml.py               # Collaborative-filtering recommender
 ├── inserta_dataset.py         # Inserts an additional product category
 ├── requirements.txt           # Third-party Python dependencies
+├── .gitignore
+├── LICENSE
+├── assets/                    # Figures used in this README
 ├── Informe_Proyecto_BD.pdf    # Full technical report
 └── Poster_Proyecto_BD.pdf     # Project poster
 ```
@@ -98,13 +177,7 @@ Install the Python dependencies with:
 python -m pip install -r requirements.txt
 ```
 
-The supplied `requirements.txt` installs:
-
-- PyMySQL
-- PyMongo
-- Neo4j Python Driver
-- Matplotlib
-- WordCloud
+`requirements.txt` pins the exact versions of the five direct dependencies used during development: PyMySQL, PyMongo, the Neo4j Python driver, Matplotlib and WordCloud. Transitive dependencies are left to pip.
 
 Tkinter is part of the standard Python distribution on Windows. On some Linux distributions it may need to be installed separately.
 
@@ -125,6 +198,8 @@ The optional incremental-loading script also expects:
 Office_Products_5.json
 ```
 
+The `.gitignore` excludes `*_5.json`, so these files will not be committed by accident.
+
 The data source used for the project is the Amazon Product Data collection maintained by Julian McAuley at UCSD:
 
 <https://jmcauley.ucsd.edu/data/amazon/index_2014.html>
@@ -133,12 +208,12 @@ Do not rename the files unless the corresponding paths are also updated in `conf
 
 ## Configuration
 
-Before running the project, open `configuracion.py` and set the local connection parameters for MySQL, MongoDB and Neo4j:
+All connection parameters and dataset paths are centralised in `configuracion.py`, so the project can be run in a different environment by editing that single file. It is distributed with placeholder credentials, which must be replaced with local ones before running anything:
 
 ```python
 MYSQL_HOST = "localhost"
-MYSQL_USER = "your_mysql_user"
-MYSQL_PASSWORD = "your_mysql_password"
+MYSQL_USER = "your_SQL_user"
+MYSQL_PASSWORD = "your_SQL_password"
 
 MONGO_HOST = "localhost"
 MONGO_PORT = 27017
@@ -151,7 +226,7 @@ NEO4J_PASSWORD = "your_neo4j_password"
 
 The database servers must be running before executing the scripts. Run all commands from the repository root because the project uses relative paths for the JSON files.
 
-> **Security note:** do not publish real database passwords. Keep the repository private or replace local credentials with non-sensitive placeholder values before making it public.
+> **Security note:** these are placeholders, not working credentials. Do not commit real database passwords to a public repository.
 
 ## Execution
 
@@ -211,18 +286,6 @@ After placing `Office_Products_5.json` in the repository root:
 python inserta_dataset.py
 ```
 
-## Database design
-
-The main MySQL tables are:
-
-- `USUARIO`: unique reviewers.
-- `ARTICULO`: unique products identified by ASIN.
-- `CATEGORIA`: source product categories.
-- `REVIEW`: structured review information and links to users and products.
-- `REVIEW_CATEGORIA`: many-to-many relationship that records every source category in which a review appeared.
-
-The MongoDB collection stores the document-oriented portion of each review and uses the MySQL review identifier to connect both representations.
-
 ## Authors and contributions
 
 ### Rodrigo Alejandro Sicilia Maroto
@@ -259,9 +322,14 @@ The report contains the complete design justification, database diagrams, implem
 - The project depends on three external database servers and is not a single-command deployment.
 - Connection settings and dataset paths must be configured manually.
 - The raw datasets are not distributed with the repository.
-- The collaborative-filtering model is affected by the sparsity of the user-product matrix.
+- The collaborative-filtering model is affected by the sparsity of the user-product matrix: in the evaluation described above, 84,541 of the test ratings had no usable neighbour and could not be predicted.
+- The value of *k* in the collaborative-filtering model was fixed experimentally rather than tuned by cross-validation.
 - The implementation was developed as an academic project and is not intended as a production service.
+
+## License
+
+The source code is released under the [MIT License](LICENSE), jointly by both authors. The source datasets belong to their respective authors and distributors and are not covered by this licence.
 
 ## Academic use
 
-This repository is provided as an academic portfolio project. The source datasets belong to their respective authors and distributors. The code and accompanying documents were produced jointly by Rodrigo Alejandro Sicilia Maroto and Claudia Moya Rodríguez.
+This repository is provided as an academic portfolio project. The code and accompanying documents were produced jointly by Rodrigo Alejandro Sicilia Maroto and Claudia Moya Rodríguez.
